@@ -102,51 +102,56 @@ def fetch_metrics(cfg):
 
 def collector_once():
  ts=time.time();err=[]
+ # Keep the database closed while waiting for GPU and Strata I/O.
  with LOCK,db_connection() as c:
   cfg=settings(c)
-  try:gpu=gpu_read()
-  except Exception as e:gpu=[];err.append('nvidia-smi: '+str(e)[:160])
-  try:
-   cp=cpu_read(); prev=state(c,'cpu_prev'); setstate(c,'cpu_prev',cp)
-   usage=max(0,min(1,1-(cp[0]-prev[0])/(cp[1]-prev[1]))) if prev and cp[1]>prev[1] else 0
-  except Exception as e:usage=0;err.append('CPU: '+str(e)[:160])
+ try:gpu=gpu_read()
+ except Exception as e:gpu=[];err.append('nvidia-smi: '+str(e)[:160])
+ try:cp=cpu_read()
+ except Exception as e:cp=None;err.append('CPU: '+str(e)[:160])
+ try:metrics=fetch_metrics(cfg)
+ except Exception as e:metrics=None;err.append('Strata: '+str(e)[:160])
+ # All state updates and the sample row are written atomically.
+ with LOCK,db_connection() as c:
+  if cp is not None:
+   prev_cpu=state(c,'cpu_prev');setstate(c,'cpu_prev',cp)
+   usage=max(0,min(1,1-(cp[0]-prev_cpu[0])/(cp[1]-prev_cpu[1]))) if prev_cpu and cp[1]>prev_cpu[1] else 0
+  else:usage=0
   prev=state(c,'last_sample')
-  # Missing intervals are deliberately not interpolated beyond 2 sample periods.
   delta=max(0,min(ts-prev['ts'],float(cfg['sample_seconds'])*2)) if prev else 0
   gpu_valid=bool(gpu) and all(x['watts'] is not None for x in gpu)
   if not gpu_valid:err.append('GPU power unavailable: system energy/cost sampling paused')
-  gpu_w=sum(x['watts'] for x in gpu if x['watts'] is not None) if gpu_valid else None
+  gpu_w=sum(x['watts'] for x in gpu) if gpu_valid else None
   cpu_w=float(cfg['cpu_idle_w'])+usage*(float(cfg['cpu_busy_w'])-float(cfg['cpu_idle_w']))
   system_w=(gpu_w+cpu_w+float(cfg['board_other_w']))/max(0.5,float(cfg['psu_efficiency'])) if gpu_valid else None
   gpu_e=0;oldgpu=prev.get('gpus',{}) if prev else {}
   for x in gpu:
-   old=oldgpu.get(x['uuid']); watt=x['watts']
+   old=oldgpu.get(x['uuid']);watt=x['watts']
    energy=max(0,(watt+old)/2*delta/3600000) if old is not None and watt is not None else 0
    gpu_e+=energy
    c.execute('INSERT INTO gpus VALUES(?,?,?,?,?,?,?,?,?)',(ts,x['uuid'],x['name'],x['idx'],watt,x['util'],x['mem_used'],x['mem_total'],energy))
   sys_e=(system_w+prev['system_w'])/2*delta/3600000 if prev and gpu_valid and prev.get('gpu_valid') and prev.get('system_w') is not None else 0
   setstate(c,'last_sample',dict(ts=ts,system_w=system_w,gpu_valid=gpu_valid,gpus={x['uuid']:x['watts'] for x in gpu}))
   i_delta=o_delta=cached_delta=0;ok=0
-  try:
-   metrics=fetch_metrics(cfg)
-   i,ip=find_tokens(metrics,[cfg['input_path']]+PATHS_IN)
-   o,op=find_tokens(metrics,[cfg['output_path']]+PATHS_OUT)
-   cached,_=find_tokens(metrics,['totals.reused'])
-   if i is None and o is None:err.append('Strata: token counters not found; configure JSON paths')
-   else:
-    ok=1
-    for name,val in [('input',i),('output',o),('cached',cached)]:
-     if val is None:continue
-     old=state(c,'strata_'+name)
-     # Reset means establish a new baseline; avoid attributing totals to a previous sampling window.
-     gain=max(0,val-old) if old is not None and val>=old else 0
-     if name=='input':i_delta=gain
-     elif name=='output':o_delta=gain
-     else:cached_delta=gain
-     setstate(c,'strata_'+name,val)
-    setstate(c,'strata_detected',{'input':ip,'output':op})
-  except Exception as e:err.append('Strata: '+str(e)[:160])
-  c.execute('INSERT INTO samples(ts,cpu_usage,gpu_w,system_w,gpu_kwh_delta,system_kwh_delta,strata_ok,input_delta,output_delta,error,cached_delta) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(ts,usage,gpu_w,system_w if gpu_valid else None,gpu_e,sys_e,ok,i_delta,o_delta,'; '.join(err),cached_delta))
+  if metrics is not None:
+   try:
+    i,ip=find_tokens(metrics,[cfg['input_path']]+PATHS_IN)
+    o,op=find_tokens(metrics,[cfg['output_path']]+PATHS_OUT)
+    cached,_=find_tokens(metrics,['totals.reused'])
+    if i is None and o is None:err.append('Strata: token counters not found; configure JSON paths')
+    else:
+     ok=1
+     for name,val in [('input',i),('output',o),('cached',cached)]:
+      if val is None:continue
+      old=state(c,'strata_'+name)
+      gain=max(0,val-old) if old is not None and val>=old else 0
+      if name=='input':i_delta=gain
+      elif name=='output':o_delta=gain
+      else:cached_delta=gain
+      setstate(c,'strata_'+name,val)
+     setstate(c,'strata_detected',{'input':ip,'output':op})
+   except Exception as e:err.append('Strata counters: '+str(e)[:160])
+  c.execute('INSERT INTO samples(ts,cpu_usage,gpu_w,system_w,gpu_kwh_delta,system_kwh_delta,strata_ok,input_delta,output_delta,error,cached_delta) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(ts,usage,gpu_w,system_w,gpu_e,sys_e,ok,i_delta,o_delta,'; '.join(err),cached_delta))
 
 def aggregate(c,period):
  since={'24h':time.time()-86400,'7d':time.time()-604800,'30d':time.time()-2592000,'all':0}.get(period,time.time()-86400)
@@ -155,7 +160,7 @@ def aggregate(c,period):
  return dict(r)|dict(energy_cost=r['system_kwh']*float(cfg['electricity_price']),api_equivalent=(r['inputs']*float(cfg['api_input_per_million'])+r['outputs']*float(cfg['api_output_per_million']))/1e6,period=period)
 
 def snapshot(period):
- with LOCK,db_connection() as c:
+ with db_connection() as c:
   cfg=settings(c);agg=aggregate(c,period)
   last=c.execute('SELECT * FROM samples ORDER BY ts DESC LIMIT 1').fetchone()
   gpu=[]
@@ -254,12 +259,37 @@ def collector_loop(stop_event=None):
   stop_event.wait(secs)
 
 
+class DashboardServer(ThreadingHTTPServer):
+ daemon_threads=True
+ request_queue_size=32
+ def process_request(self,request,client_address):
+  if not self._request_slots.acquire(blocking=False):
+   self.shutdown_request(request)
+   return
+  try:
+   super().process_request(request,client_address)
+  except BaseException:
+   self._request_slots.release()
+   raise
+
+ def process_request_thread(self,request,client_address):
+  try:
+   request.settimeout(10)
+   super().process_request_thread(request,client_address)
+  finally:
+   self._request_slots.release()
+
+ def server_bind(self):
+  self._request_slots=threading.BoundedSemaphore(32)
+  super().server_bind()
+
+
 def run():
  init()
  threading.Thread(target=collector_loop,daemon=True,name='dashboard-collector').start()
  host=os.environ.get('AI_DASH_HOST','127.0.0.1');port=int(os.environ.get('AI_DASH_PORT','8092'))
  print(f'Dashboard http://{host}:{port}',flush=True)
- ThreadingHTTPServer((host,port),Handler).serve_forever()
+ DashboardServer((host,port),Handler).serve_forever()
 
 if __name__=='__main__':
  parser=argparse.ArgumentParser();parser.add_argument('command',nargs='?',default='serve',choices=['serve','report','sample']);parser.add_argument('--period',default='24h');args=parser.parse_args()
