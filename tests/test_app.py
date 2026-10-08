@@ -22,6 +22,14 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual([x['uuid'] for x in rows], ['GPU-one', 'GPU-two', 'GPU-three'])
         self.assertAlmostEqual(sum(x['watts'] for x in rows), 367.5)
 
+    def test_default_currency(self):
+        self.assertEqual(app.DEFAULT["currency"], "EUR")
+
+    def test_api_equivalent_and_electricity_same_units(self):
+        inputs, outputs, kwh = 1_000_000, 100_000, 10
+        input_price, output_price, rate = 2, 8, 0.25
+        self.assertAlmostEqual((inputs*input_price + outputs*output_price)/1e6 - kwh*rate, 0.3)
+
     def test_bad_metric_is_not_a_number(self):
         self.assertIsNone(app.numeric('N/A'))
         self.assertIsNone(app.numeric('nan'))
