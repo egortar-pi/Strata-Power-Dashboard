@@ -37,13 +37,83 @@ chmod +x install.sh
 
 Open the dashboard from the same machine at **http://127.0.0.1:8092**.
 
-For remote access from Windows (recommended):
+## 🌐 Accessing the Dashboard over LAN
 
-```powershell
-ssh -N -L 8092:127.0.0.1:8092 USER@SERVER_IP
+By default, AI Power Dashboard listens on `127.0.0.1:8092`, meaning it is only accessible from the machine on which it is running.
+
+To access the dashboard from other devices on your local network, change the listening address to `0.0.0.0`.
+
+### 1. Update the systemd service
+
+Open the service configuration:
+
+```bash
+sudo nano /etc/systemd/system/ai-power-dashboard.service
 ```
 
-Then open **http://127.0.0.1:8092** on Windows. The collector continues running if the SSH tunnel closes.
+In the `[Service]` section, set:
+
+```ini
+Environment=HOST=0.0.0.0
+```
+
+> **Note:** This assumes your installation reads the `HOST` environment variable. If the application uses a command-line argument instead, change its host argument to `--host 0.0.0.0`.
+
+### 2. Restart the service
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart ai-power-dashboard
+```
+
+Verify that the dashboard is listening on all network interfaces:
+
+```bash
+sudo ss -lntp | grep 8092
+```
+
+Expected output should include:
+
+```text
+0.0.0.0:8092
+```
+
+### 3. Configure the firewall (optional)
+
+If UFW is enabled, allow access from your local network:
+
+```bash
+sudo ufw allow from 192.168.0.0/24 to any port 8092 proto tcp
+```
+
+Replace `192.168.0.0/24` with your actual LAN subnet.
+
+### 4. Open the dashboard
+
+From another device on your network, visit:
+
+```text
+http://YOUR_SERVER_IP:8092
+```
+
+For example:
+
+```text
+http://192.168.0.152:8092
+```
+
+### 🔒 Security Notice
+
+**Binding to `0.0.0.0` makes the dashboard accessible through all network interfaces, not just your LAN.**
+
+The dashboard does not currently provide built-in authentication, and its settings can be modified through the web interface.
+
+- Use this configuration only on trusted networks.
+- Restrict access using firewall rules.
+- Do not expose port `8092` directly to the public internet.
+- For remote access, prefer SSH tunneling, Tailscale, or a secured reverse proxy.
+
+For maximum security, keep the default `127.0.0.1` binding and access the dashboard through an SSH tunnel.
 
 ### Manual run (without systemd)
 
