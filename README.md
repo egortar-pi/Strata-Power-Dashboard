@@ -28,7 +28,7 @@ Track multiple NVIDIA GPUs, estimated whole-system energy usage, electricity bil
 ## Quick start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ai-power-dashboard.git
+git clone https://github.com/egortar-pi/ai-power-dashboard.git
 cd ai-power-dashboard
 nvidia-smi  # Verify the driver and all cards first
 chmod +x install.sh
