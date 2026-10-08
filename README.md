@@ -55,6 +55,63 @@ ssh -N -L 8092:127.0.0.1:8092 USER@SERVER_IP
 
 Then open **http://127.0.0.1:8092** on Windows. The collector continues running if the SSH tunnel closes.
 
+## Accessing the dashboard from your local network (LAN)
+
+By default, the dashboard binds to `127.0.0.1:8092`, so it can only be opened locally or through an SSH tunnel. If you want to open it from another computer on your trusted LAN, bind the web server to `0.0.0.0` instead.
+
+### 1. Change the systemd listening address
+
+Open the installed service:
+
+```bash
+sudo systemctl edit ai-power-dashboard
+```
+
+Add this override (it preserves the rest of the installed service):
+
+```ini
+[Service]
+Environment="AI_DASH_HOST=0.0.0.0"
+```
+
+> `0.0.0.0` means **all network interfaces**, not only your LAN. The default port remains `8092`. The application reads `AI_DASH_HOST` from the environment.
+
+### 2. Apply and verify
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart ai-power-dashboard
+sudo ss -lntp | grep 8092
+```
+
+The listening address should be `0.0.0.0:8092`. Check the API locally:
+
+```bash
+curl -fsS http://127.0.0.1:8092/api/health
+```
+
+### 3. Allow only your LAN through the firewall (if UFW is enabled)
+
+For example, if your LAN is `192.168.0.0/24`:
+
+```bash
+sudo ufw allow from 192.168.0.0/24 to any port 8092 proto tcp
+```
+
+Replace this subnet with your actual network. Check `sudo ufw status` first; if managing the server remotely, ensure your SSH access is allowed before making firewall changes. A firewall rule is necessary to restrict exposure because binding to `0.0.0.0` itself does not restrict access to the LAN.
+
+### 4. Open it from another device
+
+```text
+http://SERVER_LAN_IP:8092
+```
+
+For example: `http://192.168.0.152:8092` (replace with your server's IP).
+
+**Security warning:** This dashboard currently has **no login/authentication** and can change its settings through the web API. Use `0.0.0.0` only on a trusted network with appropriate firewall restrictions; do **not** forward port `8092` from your router or expose it to the public internet. For untrusted networks, use the default `127.0.0.1` binding with an SSH tunnel or VPN instead.
+
+To revert to localhost-only mode, remove the `AI_DASH_HOST=0.0.0.0` override, then reload systemd and restart the service.
+
 ### Manual run (without systemd)
 
 ```bash
