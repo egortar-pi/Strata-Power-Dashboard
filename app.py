@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Local AI power and tokens dashboard. Python standard library only."""
-import argparse, json, os, sqlite3, subprocess, threading, time, urllib.request, urllib.error, pathlib, datetime, math
+import argparse, json, os, sqlite3, subprocess, threading, time, urllib.request, urllib.error, pathlib, datetime, math, logging
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-ROOT=pathlib.Path(os.environ.get('AI_DASH_DIR',str(pathlib.Path.home()/'.local/share/ai-power-dashboard')))
-DB=ROOT/'history.sqlite3'; HTML=pathlib.Path(__file__).with_name('index.html')
+ROOT=pathlib.Path(os.environ.get('AI_DASH_DIR',str(pathlib.Path.home()/'.local/share/ai-power-dashboard'))).expanduser()
+DB=pathlib.Path(os.environ.get('AI_DASH_DB',str(ROOT/'history.sqlite3'))).expanduser()
+HTML=pathlib.Path(__file__).with_name('index.html')
+logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
 LOCK=threading.RLock()
 DEFAULT={
  'electricity_price':0.25,'currency':'EUR',
@@ -23,7 +25,7 @@ def con():
  c=sqlite3.connect(DB,timeout=30); c.row_factory=sqlite3.Row; c.execute('PRAGMA journal_mode=WAL'); c.execute('PRAGMA busy_timeout=30000'); return c
 
 def init():
- ROOT.mkdir(parents=True,exist_ok=True)
+ DB.parent.mkdir(parents=True,exist_ok=True)
  with con() as c:
   c.executescript('''CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS samples(ts REAL PRIMARY KEY,cpu_usage REAL,gpu_w REAL,system_w REAL,gpu_kwh_delta REAL,system_kwh_delta REAL,strata_ok INTEGER, input_delta INTEGER,output_delta INTEGER,error TEXT);
@@ -96,16 +98,16 @@ def collector_once():
   delta=max(0,min(ts-prev['ts'],float(cfg['sample_seconds'])*2)) if prev else 0
   gpu_valid=bool(gpu) and all(x['watts'] is not None for x in gpu)
   if not gpu_valid:err.append('GPU power unavailable: system energy/cost sampling paused')
-  gpu_w=sum(x['watts'] for x in gpu if x['watts'] is not None)
+  gpu_w=sum(x['watts'] for x in gpu if x['watts'] is not None) if gpu_valid else None
   cpu_w=float(cfg['cpu_idle_w'])+usage*(float(cfg['cpu_busy_w'])-float(cfg['cpu_idle_w']))
-  system_w=(gpu_w+cpu_w+float(cfg['board_other_w']))/max(0.5,float(cfg['psu_efficiency']))
+  system_w=(gpu_w+cpu_w+float(cfg['board_other_w']))/max(0.5,float(cfg['psu_efficiency'])) if gpu_valid else None
   gpu_e=0;oldgpu=prev.get('gpus',{}) if prev else {}
   for x in gpu:
    old=oldgpu.get(x['uuid']); watt=x['watts']
    energy=max(0,(watt+old)/2*delta/3600000) if old is not None and watt is not None else 0
    gpu_e+=energy
    c.execute('INSERT INTO gpus VALUES(?,?,?,?,?,?,?,?,?)',(ts,x['uuid'],x['name'],x['idx'],watt,x['util'],x['mem_used'],x['mem_total'],energy))
-  sys_e=(system_w+prev['system_w'])/2*delta/3600000 if prev and gpu_valid and prev.get('gpu_valid') else 0
+  sys_e=(system_w+prev['system_w'])/2*delta/3600000 if prev and gpu_valid and prev.get('gpu_valid') and prev.get('system_w') is not None else 0
   setstate(c,'last_sample',dict(ts=ts,system_w=system_w,gpu_valid=gpu_valid,gpus={x['uuid']:x['watts'] for x in gpu}))
   i_delta=o_delta=cached_delta=0;ok=0
   try:
@@ -171,10 +173,24 @@ class Handler(BaseHTTPRequestHandler):
   raw=json.dumps(data,ensure_ascii=False).encode();self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
  def do_GET(self):
   p=urlparse(self.path)
-  if p.path=='/api/data':return self.answer(snapshot(parse_qs(p.query).get('period',['24h'])[0]))
-  if p.path=='/api/health':return self.answer({'status':'ok'})
+  if p.path=='/api/data':
+   try:return self.answer(snapshot(parse_qs(p.query).get('period',['24h'])[0]))
+   except Exception:
+    logging.exception('Dashboard API failed')
+    return self.answer({'error':'Dashboard data temporarily unavailable'},503)
+  if p.path=='/api/health':
+   try:
+    with con() as c:c.execute('SELECT 1').fetchone()
+    return self.answer({'status':'ok','database':'ok'})
+   except Exception:
+    logging.exception('Dashboard health check failed')
+    return self.answer({'status':'degraded','database':'unavailable'},503)
   if p.path=='/':
-   raw=HTML.read_bytes();self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
+   try:raw=HTML.read_bytes()
+   except OSError:
+    logging.exception('Dashboard HTML unavailable')
+    return self.answer({'error':'Dashboard HTML unavailable'},503)
+   self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw);return
   self.send_error(404)
  def do_POST(self):
   if urlparse(self.path).path!='/api/settings':return self.send_error(404)
@@ -202,15 +218,28 @@ class Handler(BaseHTTPRequestHandler):
   except Exception as e:return self.answer({'error':str(e)},400)
  def log_message(self,fmt,*args):pass
 
+def collector_loop(stop_event=None):
+ """Never exit permanently due to a temporary SQLite or metrics failure."""
+ stop_event=stop_event or threading.Event()
+ while not stop_event.is_set():
+  secs=5.0
+  try:
+   collector_once()
+  except Exception:
+   logging.exception('Collector failed; retrying')
+  try:
+   with LOCK,con() as c:
+    secs=float(settings(c)['sample_seconds'])
+   if not math.isfinite(secs) or secs<2 or secs>60:
+    secs=5.0
+  except Exception:
+   logging.exception('Cannot read polling interval; using 5 seconds')
+  stop_event.wait(secs)
+
+
 def run():
  init()
- def worker():
-  while True:
-   try:collector_once()
-   except Exception as e:print('collector error:',e,flush=True)
-   with con() as c:secs=float(settings(c)['sample_seconds'])
-   time.sleep(secs)
- threading.Thread(target=worker,daemon=True).start()
+ threading.Thread(target=collector_loop,daemon=True,name='dashboard-collector').start()
  host=os.environ.get('AI_DASH_HOST','127.0.0.1');port=int(os.environ.get('AI_DASH_PORT','8092'))
  print(f'Dashboard http://{host}:{port}',flush=True)
  ThreadingHTTPServer((host,port),Handler).serve_forever()
