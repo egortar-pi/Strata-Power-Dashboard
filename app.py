@@ -179,6 +179,7 @@ class Handler(BaseHTTPRequestHandler):
       v=float(v)
       if not math.isfinite(v) or v<0 or v>100000:raise ValueError('Invalid '+k)
      elif not isinstance(v,str) or len(v)>1000:raise ValueError('Invalid '+k)
+     if k=='currency' and v not in ('EUR','USD','GBP','PLN','UAH','CHF','CZK','SEK','NOK','DKK'):raise ValueError('Unsupported currency')
      if k=='strata_url' and (not v.startswith(('http://127.0.0.1:','http://localhost:'))):raise ValueError('Strata URL must be loopback (127.0.0.1 or localhost)')
      if k=='psu_efficiency' and not 0.5<=v<=1:raise ValueError('PSU efficiency must be 0.5–1')
      if k=='sample_seconds' and not 2<=v<=60:raise ValueError('Sample seconds 2–60')
