@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local AI power and tokens dashboard. Python standard library only."""
 import argparse, json, os, sqlite3, subprocess, threading, time, urllib.request, urllib.error, pathlib, datetime, math, logging
+from contextlib import contextmanager, closing
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -22,11 +23,27 @@ PATHS_IN=['total_input_tokens','input_tokens','tokens.input','tokens.prompt','us
 PATHS_OUT=['total_output_tokens','output_tokens','tokens.output','tokens.generated','usage.completion_tokens','usage.output_tokens','totals.output_tokens','totals.completion_tokens','total_completion_tokens','completion_tokens','generated_tokens','stats.total_generated_tokens','requests.completion_tokens']
 
 def con():
- c=sqlite3.connect(DB,timeout=30); c.row_factory=sqlite3.Row; c.execute('PRAGMA journal_mode=WAL'); c.execute('PRAGMA busy_timeout=30000'); return c
+ # Each caller must close the connection. Initialization failures close here too.
+ c=sqlite3.connect(DB, timeout=5)
+ try:
+  c.row_factory=sqlite3.Row
+  c.execute('PRAGMA busy_timeout=5000')
+  return c
+ except BaseException:
+  c.close()
+  raise
+
+@contextmanager
+def db_connection():
+ # sqlite3's own context manager commits/rolls back but DOES NOT close.
+ with closing(con()) as c:
+  with c:
+   yield c
 
 def init():
  DB.parent.mkdir(parents=True,exist_ok=True)
- with con() as c:
+ with db_connection() as c:
+  c.execute('PRAGMA journal_mode=WAL')
   c.executescript('''CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS samples(ts REAL PRIMARY KEY,cpu_usage REAL,gpu_w REAL,system_w REAL,gpu_kwh_delta REAL,system_kwh_delta REAL,strata_ok INTEGER, input_delta INTEGER,output_delta INTEGER,error TEXT);
   CREATE TABLE IF NOT EXISTS gpus(ts REAL NOT NULL,uuid TEXT NOT NULL,name TEXT,idx INTEGER,watts REAL,util REAL,mem_used REAL,mem_total REAL,kwh_delta REAL NOT NULL,PRIMARY KEY(ts,uuid));
@@ -85,7 +102,7 @@ def fetch_metrics(cfg):
 
 def collector_once():
  ts=time.time();err=[]
- with LOCK,con() as c:
+ with LOCK,db_connection() as c:
   cfg=settings(c)
   try:gpu=gpu_read()
   except Exception as e:gpu=[];err.append('nvidia-smi: '+str(e)[:160])
@@ -138,7 +155,7 @@ def aggregate(c,period):
  return dict(r)|dict(energy_cost=r['system_kwh']*float(cfg['electricity_price']),api_equivalent=(r['inputs']*float(cfg['api_input_per_million'])+r['outputs']*float(cfg['api_output_per_million']))/1e6,period=period)
 
 def snapshot(period):
- with LOCK,con() as c:
+ with LOCK,db_connection() as c:
   cfg=settings(c);agg=aggregate(c,period)
   last=c.execute('SELECT * FROM samples ORDER BY ts DESC LIMIT 1').fetchone()
   gpu=[]
@@ -180,7 +197,7 @@ class Handler(BaseHTTPRequestHandler):
     return self.answer({'error':'Dashboard data temporarily unavailable'},503)
   if p.path=='/api/health':
    try:
-    with con() as c:c.execute('SELECT 1').fetchone()
+    with db_connection() as c:c.execute('SELECT 1').fetchone()
     return self.answer({'status':'ok','database':'ok'})
    except Exception:
     logging.exception('Dashboard health check failed')
@@ -202,7 +219,7 @@ class Handler(BaseHTTPRequestHandler):
    size=int(self.headers.get('Content-Length','0'))
    if not 0<size<10000:raise ValueError('invalid length')
    data=json.loads(self.rfile.read(size))
-   with LOCK,con() as c:
+   with LOCK,db_connection() as c:
     for k,v in data.items():
      if k not in DEFAULT:continue
      if isinstance(DEFAULT[k],(int,float)):
@@ -228,7 +245,7 @@ def collector_loop(stop_event=None):
   except Exception:
    logging.exception('Collector failed; retrying')
   try:
-   with LOCK,con() as c:
+   with LOCK,db_connection() as c:
     secs=float(settings(c)['sample_seconds'])
    if not math.isfinite(secs) or secs<2 or secs>60:
     secs=5.0
