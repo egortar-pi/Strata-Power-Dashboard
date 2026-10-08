@@ -148,7 +148,21 @@ def snapshot(period):
   n=max(1,math.ceil(len(rows)/400));chart=[]
   for off in range(0,len(rows),n):
    group=rows[off:off+n]
-   chart.append(dict(ts=group[-1]['ts'],gpu_w=sum(r['gpu_w'] for r in group)/len(group),system_w=sum(r['system_w'] for r in group)/len(group),input=sum(r['input_delta'] for r in group),output=sum(r['output_delta'] for r in group),kwh=sum(r['system_kwh_delta'] for r in group)))
+   # Older SQLite history may contain NULL fields. Do not mistake missing
+   # wattage measurements for genuine 0W measurements.
+   def average_available(key):
+    values=[r[key] for r in group if r[key] is not None]
+    return sum(values)/len(values) if values else None
+   def sum_available(key):
+    return sum(r[key] for r in group if r[key] is not None)
+   chart.append(dict(
+    ts=group[-1]['ts'],
+    gpu_w=average_available('gpu_w'),
+    system_w=average_available('system_w'),
+    input=sum_available('input_delta'),
+    output=sum_available('output_delta'),
+    kwh=sum_available('system_kwh_delta')
+   ))
   per_gpu=[dict(r) for r in c.execute('SELECT uuid,MAX(name) name, SUM(kwh_delta) kwh,MAX(watts) peak FROM gpus WHERE ts>=? GROUP BY uuid',(since,))]
   return dict(config=cfg,totals=agg,latest=dict(last) if last else None,gpus=gpu,per_gpu=per_gpu,chart=chart,detected=state(c,'strata_detected'))
 
