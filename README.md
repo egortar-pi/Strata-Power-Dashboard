@@ -6,13 +6,23 @@ Track multiple NVIDIA GPUs, estimated whole-system energy usage, electricity bil
 
 **No Docker, Nginx, cloud account, JavaScript build tools, or Python packages required.**
 
+## Currency settings
+
+Select **Settings → Currency (all prices)** once (default: **EUR**). All monetary fields use that currency:
+
+- **Electricity rate per kWh:** numeric only, e.g. `0.25`.
+- **API input/output price per 1M tokens:** numeric only, entered in the same currency.
+- Dashboard costs and the API-minus-electricity comparison display numbers; the currency is indicated once in the dashboard header.
+
+**No automatic exchange-rate conversion:** if you switch currency, update electricity and API numeric prices yourself. This avoids mixing USD-priced APIs with EUR electricity.
+
 ## Features
 
 - **Multi-GPU power monitoring:** per-GPU watts, utilization, VRAM and energy (kWh) from `nvidia-smi`, identified by GPU UUID.
 - **Estimated wall power:** GPU readings + configurable CPU idle/load estimates + motherboard/RAM/storage/fans estimate, adjusted for PSU efficiency.
-- **Electricity costs:** editable price per kWh and currency, plus historical energy totals.
+- **Electricity costs:** editable price per kWh with one global currency (EUR by default), plus historical energy totals.
 - **Strata token analytics:** input (`totals.prompt_tokens`), output (`totals.output_tokens`) and reused/cached input (`totals.reused`), using cumulative counter deltas.
-- **API cost comparison:** editable USD input/output prices per million tokens. This is a *hypothetical API-equivalent cost*, **not** a precise comparison with subscription plans or model quality.
+- **API cost comparison:** editable input/output prices per million tokens in the same global currency. This is a *hypothetical API-equivalent cost*, **not** a precise comparison with subscription plans or model quality.
 - **Historical SQLite storage:** 24h, 7d, 30d and all-time reporting, surviving reboots and service restarts.
 - **Live web UI:** auto-updates every 5 seconds, with a power chart, GPU details and settings.
 - **Boot-time startup:** optional `systemd` service.
@@ -28,7 +38,7 @@ Track multiple NVIDIA GPUs, estimated whole-system energy usage, electricity bil
 ## Quick start
 
 ```bash
-git clone https://github.com/egortar-pi/ai-power-dashboard.git
+git clone https://github.com/YOUR_USERNAME/ai-power-dashboard.git
 cd ai-power-dashboard
 nvidia-smi  # Verify the driver and all cards first
 chmod +x install.sh
@@ -37,83 +47,13 @@ chmod +x install.sh
 
 Open the dashboard from the same machine at **http://127.0.0.1:8092**.
 
-## 🌐 Accessing the Dashboard over LAN
+For remote access from Windows (recommended):
 
-By default, AI Power Dashboard listens on `127.0.0.1:8092`, meaning it is only accessible from the machine on which it is running.
-
-To access the dashboard from other devices on your local network, change the listening address to `0.0.0.0`.
-
-### 1. Update the systemd service
-
-Open the service configuration:
-
-```bash
-sudo nano /etc/systemd/system/ai-power-dashboard.service
+```powershell
+ssh -N -L 8092:127.0.0.1:8092 USER@SERVER_IP
 ```
 
-In the `[Service]` section, set:
-
-```ini
-Environment=HOST=0.0.0.0
-```
-
-> **Note:** This assumes your installation reads the `HOST` environment variable. If the application uses a command-line argument instead, change its host argument to `--host 0.0.0.0`.
-
-### 2. Restart the service
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart ai-power-dashboard
-```
-
-Verify that the dashboard is listening on all network interfaces:
-
-```bash
-sudo ss -lntp | grep 8092
-```
-
-Expected output should include:
-
-```text
-0.0.0.0:8092
-```
-
-### 3. Configure the firewall (optional)
-
-If UFW is enabled, allow access from your local network:
-
-```bash
-sudo ufw allow from 192.168.0.0/24 to any port 8092 proto tcp
-```
-
-Replace `192.168.0.0/24` with your actual LAN subnet.
-
-### 4. Open the dashboard
-
-From another device on your network, visit:
-
-```text
-http://YOUR_SERVER_IP:8092
-```
-
-For example:
-
-```text
-http://192.168.0.152:8092
-```
-
-### 🔒 Security Notice
-
-**Binding to `0.0.0.0` makes the dashboard accessible through all network interfaces, not just your LAN.**
-
-The dashboard does not currently provide built-in authentication, and its settings can be modified through the web interface.
-
-- Use this configuration only on trusted networks.
-- Restrict access using firewall rules.
-- Do not expose port `8092` directly to the public internet.
-- For remote access, prefer SSH tunneling, Tailscale, or a secured reverse proxy.
-
-For maximum security, keep the default `127.0.0.1` binding and access the dashboard through an SSH tunnel.
+Then open **http://127.0.0.1:8092** on Windows. The collector continues running if the SSH tunnel closes.
 
 ### Manual run (without systemd)
 
@@ -128,7 +68,7 @@ Open **Settings** in the dashboard to edit:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| Electricity rate | 0.25 EUR/kWh | Cost per kWh (choose your currency) |
+| Electricity rate | 0.25 EUR/kWh | Cost per kWh in the globally selected currency |
 | CPU idle / busy | 25 / 110 W | Approximate CPU power range |
 | Other components | 55 W | Motherboard, memory, storage and fans |
 | PSU efficiency | 0.88 | Assumed DC-to-AC efficiency |
@@ -186,7 +126,7 @@ The dashboard does not collect prompts, responses or API keys, but may store fil
 
 **Strata tokens stay at zero:** verify `curl http://127.0.0.1:8080/metrics` and inspect the `totals` object. The first successful poll establishes a baseline, so prior requests are not included.
 
-**API-equivalent value vs electricity mismatch:** API comparisons are priced in USD; electricity is shown in your chosen currency. No exchange rate is assumed or silently applied.
+**Currency:** Settings contains one global `Currency` selector, defaulting to `EUR`. Electricity and API price fields accept numbers only. Both are interpreted in that currency and compared directly. No exchange conversion takes place. Changing the currency selector does not convert previously entered prices: update the numeric rates to match the newly selected currency.
 
 ## Limitations / roadmap
 
@@ -199,3 +139,26 @@ The dashboard does not collect prompts, responses or API keys, but may store fil
 ## Contributing / license
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Distributed under the [MIT License](LICENSE).
+
+## Stability and existing installations
+
+The collector retries after temporary SQLite errors, including failures to read its
+sampling interval. The health endpoint `/api/health` checks database availability;
+`/api/data` returns HTTP 503 instead of abruptly dropping the connection on a DB
+failure. Older `NULL` samples remain in the database and are not treated as 0 W.
+
+Configuration uses `AI_DASH_DIR` for data directory and optional `AI_DASH_DB` for
+the complete database filename. Default: `~/.local/share/ai-power-dashboard/history.sqlite3`.
+Existing installations should preserve their established path to avoid starting a new
+empty database. The installer preserves an existing systemd service and thus its LAN
+binding. Its new-service template binds to `127.0.0.1` for safety.
+
+Before updating a running installation, stop the service and back up the database
+with Python's SQLite backup API (rather than copying only the main .sqlite3 file
+while WAL mode is in use). Keep the backup outside `/opt/ai-power-dashboard`.
+
+To update only the Python code and UI after backing up, copy `app.py` and
+`index.html` to `/opt/ai-power-dashboard/` and restart the service. Existing
+settings and SQLite history remain under the configured data directory.
+
+**Note:** this dashboard is unauthenticated. Do not expose it to the Internet.
